@@ -31,6 +31,8 @@ python3 time-anchor/scripts/time-anchor.py --month
 
 This is where time-anchor differs from everything else. When you ask "how far until Tuesday?" on a Wednesday, there are two Tuesdays within 14 days — the tool returns **both** with an `ambiguous: true` flag and structured JSON so the agent knows to ask for clarification instead of guessing.
 
+Week labels are deterministic: `0-7` days away is treated as `this` / `this_week`, and `8+` days away is treated as `next` / `next_week`.
+
 ```bash
 $ python3 time-anchor/scripts/time-anchor.py --weekday Tuesday
 Upcoming Tuesdays:
@@ -62,6 +64,7 @@ Run `time-anchor.py` with no flags to see all configured goals and their distanc
 2. **Weekday reference?** Default to the next upcoming occurrence (forward-looking).
 3. **Past-tense phrasing** ("last Tuesday," "since summer started")? Look backward at most recent occurrence.
 4. **Ambiguity flagged by `--weekday`?** Ask for clarification. Don't pick one.
+5. **Short weekday prefixes?** At least 3 characters for fuzzy matching; ambiguous prefixes should be clarified, not guessed.
 
 ## Install via ClawHub
 

@@ -69,10 +69,19 @@ def resolve_weekday(name):
         )
         sys.exit(1)
 
-    # Fuzzy first-4-letter match (e.g. "tue" -> Tuesday)
-    fuzzy = [k for k in DAY_MAP if k.lower().startswith(day_lower)]
-    if len(fuzzy) == 1:
-        return fuzzy[0], DAY_MAP[fuzzy[0]]
+    # Fuzzy prefix match (e.g. "tue" -> Tuesday). Require at least 3 chars
+    # so very short prefixes like "t" don't masquerade as unknown values.
+    if len(day_lower) >= 3:
+        fuzzy = [k for k in DAY_MAP if k.lower().startswith(day_lower)]
+        if len(fuzzy) == 1:
+            return fuzzy[0], DAY_MAP[fuzzy[0]]
+        if len(fuzzy) > 1:
+            print(
+                f'Error: Ambiguous weekday prefix "{name}". '
+                f"Matches: {', '.join(sorted(fuzzy))}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
 
     print(
         f'Error: Unknown weekday "{name}". Options: {", ".join(DAY_MAP.keys())}',
@@ -86,14 +95,18 @@ def weekday_targets(name):
 
     Returns human-readable lines + JSON on the last line for programmatic use.
 
-    When multiple Tuesdays fall within 7 days, flags AMBIGUOUS and provides both
-    options so the agent can ask for clarification instead of guessing.
+    When there are two candidate weekdays within the next 14 days, flag the
+    result as ambiguous and provide both options so the agent can ask for
+    clarification instead of guessing.
+
+    Label semantics: deltas from 0 to 7 days inclusive are treated as "this"
+    / "this_week"; 8+ days becomes "next" / "next_week".
 
     Usage: time-anchor.py --weekday Tuesday
            time-anchor.py --weekday tue   (fuzzy match)
     """
     day_name, target_day_idx = resolve_weekday(name)
-    _, now = today()
+    today_str, now = today()
 
     # Collect future occurrences (up to 3 weeks ahead, max 2 results)
     future = []
@@ -114,7 +127,7 @@ def weekday_targets(name):
 
     print(f'Upcoming {day_name}s:')
     for d_str in future:
-        delta, weeks = days_between(today()[0], d_str)
+        delta, weeks = days_between(today_str, d_str)
         marker = "" if delta != 0 else " <- TODAY"
         label = f"this {day_name}" if delta <= 7 else f"next {day_name}"
         print(f"  {label} ({d_str}) -> {delta:+d} days / {weeks:.1f} weeks{marker}")
@@ -122,7 +135,7 @@ def weekday_targets(name):
     # JSON payload for agent-level disambiguation
     options = []
     for d_str in future:
-        delta, _ = days_between(today()[0], d_str)
+        delta, _ = days_between(today_str, d_str)
         label_key = "this_week" if delta <= 7 else "next_week"
         options.append(
             {"date": d_str, "label": label_key, "days_until": delta}

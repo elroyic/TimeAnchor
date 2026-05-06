@@ -20,6 +20,8 @@ python3 ~/.openclaw/workspace/skills/time-anchor/scripts/time-anchor.py [--today
 | `--today` | Today's date and day of week only |
 | `--until YYYY-MM-DD` | Days to a specific arbitrary date |
 | `--weekday Tuesday` | Upcoming occurrences + JSON with ambiguity flag |
+
+For weekday labels, `0-7` days away maps to `this` / `this_week`; `8+` days away maps to `next` / `next_week`.
 | `--month` | Days left in current month (excluding today) |
 
 ## Workflow Rules — Don't Guess
@@ -43,6 +45,7 @@ Today is Wednesday, user says "how far until Tuesday?" → use `--weekday Tuesda
 When JSON output contains `"ambiguous": true`:
 - **Do NOT pick one.** The tool is telling you there's a "this week" vs "next week" ambiguity.
 - Ask the user to clarify which occurrence they mean.
+- Short fuzzy weekday inputs should be at least 3 characters; if the prefix is still ambiguous, clarify rather than guessing.
 
 ## Adding Goals
 
