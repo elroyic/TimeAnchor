@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """Time anchor - deterministic date math for any target date."""
 
+import argparse
 import json
-import sys
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 
-# --- Defaults: convenience targets (not required; --until is primary) ---
 TARGETS = {
     "2026-05-31": "End of May",
     "2026-06-01": "Plaster painting window",
@@ -15,241 +14,254 @@ TARGETS = {
     # Add named events as they come up: "YYYY-MM-DD": "Event name"
 }
 
-# --- Weekday name to 0=Monday, 6=Sunday mapping ---
-DAY_MAP = {name: idx for idx, name in enumerate(
-    ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
-)}
+DAY_NAMES = [
+    "Monday",
+    "Tuesday",
+    "Wednesday",
+    "Thursday",
+    "Friday",
+    "Saturday",
+    "Sunday",
+]
+DAY_MAP = {name: idx for idx, name in enumerate(DAY_NAMES)}
 
 
-def validate_date(date_str):
-    """Validate and normalize a date string to YYYY-MM-DD."""
+def parse_iso_date(date_str):
+    """Parse YYYY-MM-DD into a date object."""
     try:
-        dt = datetime.strptime(date_str, "%Y-%m-%d")
-        return dt.strftime("%Y-%m-%d"), dt
-    except ValueError:
-        print(
-            f"Error: Invalid date format '{date_str}'. Expected YYYY-MM-DD.",
-            file=sys.stderr,
-        )
-        sys.exit(1)
+        return datetime.strptime(date_str, "%Y-%m-%d").date()
+    except ValueError as exc:
+        raise ValueError(
+            f"Invalid date format '{date_str}'. Expected YYYY-MM-DD."
+        ) from exc
 
 
-def today():
-    """Return today's date string and datetime object."""
-    now = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-    return now.strftime("%Y-%m-%d"), now
+def today_date():
+    """Return today's local date."""
+    return date.today()
 
 
-def days_between(date_str_from, date_str_to):
-    """Calculate days between two YYYY-MM-DD dates."""
-    _, d1 = validate_date(date_str_from)
-    _, d2 = validate_date(date_str_to)
-    delta = (d2 - d1).days
+def format_date(value):
+    """Format a date object as YYYY-MM-DD."""
+    return value.isoformat()
+
+
+def days_between(from_date, to_date):
+    """Calculate day and week deltas between two date objects."""
+    delta = (to_date - from_date).days
     weeks = round(delta / 7, 1) if delta >= 0 else -(round(abs(delta) / 7, 1))
     return delta, weeks
 
 
-def resolve_weekday(name):
-    """Resolve a weekday name to canonical capitalization and index.
+def month_end(current_date):
+    """Return the last date of the current month."""
+    if current_date.month == 12:
+        next_month = date(current_date.year + 1, 1, 1)
+    else:
+        next_month = date(current_date.year, current_date.month + 1, 1)
+    return next_month - timedelta(days=1)
 
-    Supports: 'Tuesday', 'tuesday', 'tue' (fuzzy), etc.
-    Returns (canonical_name, day_index) or exits on error.
-    """
+
+def week_labels(delta):
+    """Return human and JSON labels for a weekday delta."""
+    return ("this", "this_week") if delta <= 7 else ("next", "next_week")
+
+
+def resolve_weekday(name):
+    """Resolve a weekday name to canonical capitalization and index."""
     day_lower = name.strip().lower()
 
-    # Exact case-insensitive match
-    exact = [k for k in DAY_MAP if k.lower() == day_lower]
+    exact = [day for day in DAY_MAP if day.lower() == day_lower]
     if len(exact) == 1:
         return exact[0], DAY_MAP[exact[0]]
-    if len(exact) > 1:
-        print(
-            f'Error: Multiple weekday matches for "{name}". '
-            f"Options: {', '.join(DAY_MAP.keys())}",
-            file=sys.stderr,
-        )
-        sys.exit(1)
 
-    # Fuzzy prefix match (e.g. "tue" -> Tuesday). Require at least 3 chars
-    # so very short prefixes like "t" don't masquerade as unknown values.
     if len(day_lower) >= 3:
-        fuzzy = [k for k in DAY_MAP if k.lower().startswith(day_lower)]
+        fuzzy = [day for day in DAY_MAP if day.lower().startswith(day_lower)]
         if len(fuzzy) == 1:
             return fuzzy[0], DAY_MAP[fuzzy[0]]
         if len(fuzzy) > 1:
-            print(
-                f'Error: Ambiguous weekday prefix "{name}". '
-                f"Matches: {', '.join(sorted(fuzzy))}",
-                file=sys.stderr,
+            raise ValueError(
+                f'Ambiguous weekday prefix "{name}". Matches: {", ".join(sorted(fuzzy))}'
             )
-            sys.exit(1)
 
-    print(
-        f'Error: Unknown weekday "{name}". Options: {", ".join(DAY_MAP.keys())}',
-        file=sys.stderr,
+    raise ValueError(
+        f'Unknown weekday "{name}". Options: {", ".join(DAY_MAP.keys())}'
     )
-    sys.exit(1)
 
 
-def weekday_targets(name):
-    """Find all upcoming occurrences of a named weekday.
-
-    Returns human-readable lines + JSON on the last line for programmatic use.
-
-    When there are two candidate weekdays within the next 14 days, flag the
-    result as ambiguous and provide both options so the agent can ask for
-    clarification instead of guessing.
+def get_weekday_targets(name, anchor_date=None):
+    """Return upcoming weekday occurrences and ambiguity metadata.
 
     Label semantics: deltas from 0 to 7 days inclusive are treated as "this"
     / "this_week"; 8+ days becomes "next" / "next_week".
-
-    Usage: time-anchor.py --weekday Tuesday
-           time-anchor.py --weekday tue   (fuzzy match)
     """
+    anchor_date = anchor_date or today_date()
     day_name, target_day_idx = resolve_weekday(name)
-    today_str, now = today()
 
-    # Collect future occurrences (up to 3 weeks ahead, max 2 results)
-    future = []
-    for offset in range(0, 22):
-        candidate = now + timedelta(days=offset)
-        if candidate.weekday() == target_day_idx:
-            future.append(candidate.strftime("%Y-%m-%d"))
-            if len(future) >= 2:
-                break
-
-    # If only one result and it's >7 days away, no ambiguity.
-    # If two results within ~14 days, there's a "this week" vs "next week" issue.
-    is_ambiguous = False
-    if len(future) >= 2:
-        d0 = datetime.strptime(future[0], "%Y-%m-%d")
-        d1 = datetime.strptime(future[1], "%Y-%m-%d")
-        is_ambiguous = (d1 - d0).days <= 14
-
-    print(f'Upcoming {day_name}s:')
-    for d_str in future:
-        delta, weeks = days_between(today_str, d_str)
-        marker = "" if delta != 0 else " <- TODAY"
-        label = f"this {day_name}" if delta <= 7 else f"next {day_name}"
-        print(f"  {label} ({d_str}) -> {delta:+d} days / {weeks:.1f} weeks{marker}")
-
-    # JSON payload for agent-level disambiguation
     options = []
-    for d_str in future:
-        delta, _ = days_between(today_str, d_str)
-        label_key = "this_week" if delta <= 7 else "next_week"
+    for offset in range(22):
+        candidate = anchor_date + timedelta(days=offset)
+        if candidate.weekday() != target_day_idx:
+            continue
+
+        delta, weeks = days_between(anchor_date, candidate)
+        human_label, json_label = week_labels(delta)
         options.append(
-            {"date": d_str, "label": label_key, "days_until": delta}
+            {
+                "date": format_date(candidate),
+                "label": json_label,
+                "human_label": f"{human_label} {day_name}",
+                "days_until": delta,
+                "weeks_until": weeks,
+                "is_today": delta == 0,
+            }
         )
+        if len(options) >= 2:
+            break
 
-    result_json = {"ambiguous": is_ambiguous, "options": options}
-    print(json.dumps(result_json))
-
-
-def full_anchor():
-    """Run full anchor: today + all configured targets."""
-    today_str, now = today()
-
-    lines = [f"Today: {today_str} ({now.strftime('%A')})"]
-    lines.append("")
-
-    for target_date, label in TARGETS.items():
-        delta, weeks = days_between(today_str, target_date)
-        direction = "in" if delta >= 0 else ""
-        lines.append(
-            f"{label:35s} ({target_date}) -> {delta:+d} days / {weeks} weeks {direction}"
-        )
-
-    # Month info
-    _, now_raw = today()
-    month_end = (datetime(now_raw.year, now_raw.month + 1, 1) - timedelta(days=1))
-    days_left = (month_end - now_raw).days
-    lines.append("")
-    lines.append(
-        f"{now_raw.strftime('%B')} {now_raw.year}: "
-        f"{days_left} days remaining (excluding today)"
-    )
-
-    return "\n".join(lines), full_anchor_json(today_str)
-
-
-def full_anchor_json(today_str):
-    """Return structured JSON for programmatic use."""
-    result = {"today": today_str, "targets": {}, "month_info": {}}
-    now_dt = datetime.strptime(today_str, "%Y-%m-%d")
-
-    for target_date, label in TARGETS.items():
-        delta, weeks = days_between(today_str, target_date)
-        result["targets"][target_date] = {
-            "label": label,
-            "days_until": delta,
-            "weeks_until": weeks,
-        }
-
-    month_end = (datetime(now_dt.year, now_dt.month + 1, 1) - timedelta(days=1))
-    days_left = (month_end - now_dt).days
-    result["month_info"] = {
-        "current_month": now_dt.strftime("%B %Y"),
-        "days_remaining_excluding_today": days_left,
+    return {
+        "weekday": day_name,
+        "ambiguous": len(options) >= 2,
+        "options": options,
     }
 
-    return json.dumps(result, indent=2)
+
+def render_weekday_targets(result):
+    """Render weekday target results as text plus trailing JSON."""
+    lines = [f'Upcoming {result["weekday"]}s:']
+    for option in result["options"]:
+        marker = " <- TODAY" if option["is_today"] else ""
+        lines.append(
+            f'  {option["human_label"]} ({option["date"]}) -> '
+            f'{option["days_until"]:+d} days / {option["weeks_until"]:.1f} weeks{marker}'
+        )
+
+    json_payload = {
+        "ambiguous": result["ambiguous"],
+        "options": [
+            {
+                "date": option["date"],
+                "label": option["label"],
+                "days_until": option["days_until"],
+            }
+            for option in result["options"]
+        ],
+    }
+    lines.append(json.dumps(json_payload))
+    return "\n".join(lines)
 
 
-def single_target(target_str):
-    """Calculate days until a specific arbitrary date."""
-    target_str, td = validate_date(target_str)
-    today_str, _ = today()
-    delta, weeks = days_between(today_str, target_str)
-    direction = "in" if delta >= 0 else ""
+def get_full_anchor(anchor_date=None):
+    """Return today's date, configured targets, and month info."""
+    anchor_date = anchor_date or today_date()
+    targets = []
+    for target_str, label in TARGETS.items():
+        target_date = parse_iso_date(target_str)
+        delta, weeks = days_between(anchor_date, target_date)
+        targets.append(
+            {
+                "label": label,
+                "date": target_str,
+                "days_until": delta,
+                "weeks_until": weeks,
+                "direction": "in" if delta >= 0 else "",
+            }
+        )
 
-    print(f"Target: {target_str}")
-    print(
-        f"From:   {today_str} ({datetime.strptime(today_str, '%Y-%m-%d').strftime('%A')})"
+    end_of_month = month_end(anchor_date)
+    return {
+        "today": format_date(anchor_date),
+        "weekday": anchor_date.strftime("%A"),
+        "targets": targets,
+        "month_info": {
+            "current_month": anchor_date.strftime("%B %Y"),
+            "days_remaining_excluding_today": (end_of_month - anchor_date).days,
+        },
+    }
+
+
+def render_full_anchor(result):
+    """Render full anchor results as text."""
+    lines = [f'Today: {result["today"]} ({result["weekday"]})', ""]
+    for target in result["targets"]:
+        lines.append(
+            f'{target["label"]:35s} ({target["date"]}) -> '
+            f'{target["days_until"]:+d} days / {target["weeks_until"]} weeks {target["direction"]}'
+        )
+
+    lines.extend(
+        [
+            "",
+            f'{result["month_info"]["current_month"]}: '
+            f'{result["month_info"]["days_remaining_excluding_today"]} '
+            'days remaining (excluding today)',
+        ]
     )
-    print(f"Days:   {delta:+d} days / {weeks} weeks {direction}")
+    return "\n".join(lines)
+
+
+def render_single_target(target_date, anchor_date=None):
+    """Render a single arbitrary target date lookup."""
+    anchor_date = anchor_date or today_date()
+    delta, weeks = days_between(anchor_date, target_date)
+    direction = "in" if delta >= 0 else ""
+    return "\n".join(
+        [
+            f"Target: {format_date(target_date)}",
+            f"From:   {format_date(anchor_date)} ({anchor_date.strftime('%A')})",
+            f"Days:   {delta:+d} days / {weeks} weeks {direction}",
+        ]
+    )
+
+
+def render_month(anchor_date=None):
+    """Render current month remaining days."""
+    anchor_date = anchor_date or today_date()
+    return (
+        f"{anchor_date.strftime('%B')} {anchor_date.year}: "
+        f"{(month_end(anchor_date) - anchor_date).days} days remaining (excluding today)"
+    )
+
+
+def parse_args():
+    """Parse CLI arguments."""
+    parser = argparse.ArgumentParser(
+        description="Deterministic date math for arbitrary dates and weekdays."
+    )
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("--today", action="store_true", help="Show today's date and weekday")
+    group.add_argument("--until", metavar="DATE", help="Show distance to YYYY-MM-DD")
+    group.add_argument("--weekday", metavar="DAY", help="Show next upcoming weekday occurrences")
+    group.add_argument("--month", action="store_true", help="Show days remaining in current month")
+    return parser.parse_args()
+
+
+def main():
+    """CLI entrypoint."""
+    args = parse_args()
+    anchor_date = today_date()
+
+    if args.today:
+        print(f"{format_date(anchor_date)} ({anchor_date.strftime('%A')})")
+        return
+
+    if args.until:
+        print(render_single_target(parse_iso_date(args.until), anchor_date))
+        return
+
+    if args.weekday:
+        print(render_weekday_targets(get_weekday_targets(args.weekday, anchor_date)))
+        return
+
+    if args.month:
+        print(render_month(anchor_date))
+        return
+
+    print(render_full_anchor(get_full_anchor(anchor_date)))
 
 
 if __name__ == "__main__":
-    args = sys.argv[1:]
-
-    if "--help" in args or "-h" in args:
-        help()
-        sys.exit(0)
-
-    if "--weekday" in args:
-        idx = args.index("--weekday")
-        target_str = args[idx + 1] if idx + 1 < len(args) else None
-        if not target_str:
-            print(
-                "Error: --weekday requires a weekday name (e.g., Tuesday)",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-        weekday_targets(target_str)
-
-    elif "--until" in args:
-        idx = args.index("--until")
-        target_str = args[idx + 1] if idx + 1 < len(args) else None
-        if not target_str:
-            print(
-                "Error: --until requires a date argument (YYYY-MM-DD)", file=sys.stderr
-            )
-            sys.exit(1)
-        single_target(target_str)
-
-    elif "--month" in args:
-        _, now_raw = today()
-        month_end = (datetime(now_raw.year, now_raw.month + 1, 1) - timedelta(days=1))
-        days_left = (month_end - now_raw).days
-        print(
-            f"{now_raw.strftime('%B')} {now_raw.year}: "
-            f"{days_left} days remaining (excluding today)"
-        )
-
-    elif "--today" in args:
-        today_str, now = today()
-        print(f"{today_str} ({now.strftime('%A')})")
-
-    else:
-        output, _ = full_anchor()
-        print(output)
+    try:
+        main()
+    except ValueError as exc:
+        raise SystemExit(f"Error: {exc}")
